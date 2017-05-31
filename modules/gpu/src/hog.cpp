@@ -298,12 +298,149 @@ void cv::gpu::HOGDescriptor::computeConfidence(const GpuMat& img, vector<Point>&
     {
       int y = i / wins_per_img.width;
       int x = i - wins_per_img.width * y;
-      if (vec[i] >= hit_threshold)
-   hits.push_back(Point(x * win_stride.width, y * win_stride.height));
+      if (vec[i] >= hit_threshold){
+        hits.push_back(Point(x * win_stride.width, y * win_stride.height));
+        Point pt(win_stride.width * x, win_stride.height * y);
+        locations.push_back(pt);
+        confidences.push_back((double)vec[i]);
+      }
+    }
+}
 
-      Point pt(win_stride.width * x, win_stride.height * y);
-      locations.push_back(pt);
-      confidences.push_back((double)vec[i]);
+void cv::gpu::HOGDescriptor::detectMultiScale(const GpuMat& img, vector<Rect>& found_locations, vector<double> &foundWeights,
+                            double hit_threshold, Size win_stride, Size padding,
+                            double scale0, double finalThreshold)
+{
+    vector<double> level_scale;
+    vector<HOGConfidence> conf_out;
+    double scale = 1.;
+    int levels = 0;
+
+    for (levels = 0; levels < nlevels; levels++)
+    {
+        HOGConfidence tmp_conf;
+        tmp_conf.scale = scale;
+        conf_out.push_back(tmp_conf);
+        level_scale.push_back(scale);
+        if (cvRound(img.cols/scale) < win_size.width || cvRound(img.rows/scale) < win_size.height ||
+            scale0 <= 1)
+            break;
+        scale *= scale0;
+    }
+
+    levels = std::max(levels, 1);
+    level_scale.resize(levels);
+    foundWeights.clear();
+    std::vector<Rect> all_candidates;
+    vector<Point> locations;
+
+    for (size_t i = 0; i < level_scale.size(); i++)
+    {
+        scale = level_scale[i];
+        Size sz(cvRound(img.cols / scale), cvRound(img.rows / scale));
+        GpuMat smaller_img;
+
+        if (sz == img.size())
+            smaller_img = img;
+        else
+        {
+            smaller_img.create(sz, img.type());
+            switch (img.type())
+            {
+            case CV_8UC1: hog::resize_8UC1(img, smaller_img); break;
+            case CV_8UC4: hog::resize_8UC4(img, smaller_img); break;
+            }
+        }
+
+        computeConfidence(smaller_img, locations, hit_threshold, win_stride, padding, conf_out[i].locations, conf_out[i].confidences);
+
+        Size scaled_win_size(cvRound(win_size.width * scale), cvRound(win_size.height * scale));
+        for (size_t j = 0; j < locations.size(); j++){
+            all_candidates.push_back(Rect(Point2d((CvPoint)locations[j]) * scale, scaled_win_size));
+            foundWeights.push_back(conf_out[i].confidences[j]);
+        }
+
+    }
+
+    found_locations.assign(all_candidates.begin(), all_candidates.end());
+    _groupRectangles(found_locations, foundWeights, (int)finalThreshold, 0.2/*magic number copied from CPU version*/);
+}
+
+void cv::gpu::HOGDescriptor::_groupRectangles(vector<cv::Rect>& rectList, vector<double>& weights, int groupThreshold, double eps) const
+{
+    if( groupThreshold <= 0 || rectList.empty() )
+    {
+        return;
+    }
+
+    CV_Assert(rectList.size() == weights.size());
+
+    vector<int> labels;
+    int nclasses = partition(rectList, labels, SimilarRects(eps));
+
+    vector<cv::Rect_<double> > rrects(nclasses);
+    vector<int> numInClass(nclasses, 0);
+    vector<double> foundWeights(nclasses, -std::numeric_limits<double>::max());
+    int i, j, nlabels = (int)labels.size();
+
+    for( i = 0; i < nlabels; i++ )
+    {
+        int cls = labels[i];
+        rrects[cls].x += rectList[i].x;
+        rrects[cls].y += rectList[i].y;
+        rrects[cls].width += rectList[i].width;
+        rrects[cls].height += rectList[i].height;
+        foundWeights[cls] = std::max(foundWeights[cls], weights[i]);
+        numInClass[cls]++;
+    }
+
+    for( i = 0; i < nclasses; i++ )
+    {
+        // find the average of all ROI in the cluster
+        cv::Rect_<double> r = rrects[i];
+        double s = 1.0/numInClass[i];
+        rrects[i] = cv::Rect_<double>(cv::saturate_cast<double>(r.x*s),
+            cv::saturate_cast<double>(r.y*s),
+            cv::saturate_cast<double>(r.width*s),
+            cv::saturate_cast<double>(r.height*s));
+    }
+
+    rectList.clear();
+    weights.clear();
+
+    for( i = 0; i < nclasses; i++ )
+    {
+        cv::Rect r1 = rrects[i];
+        int n1 = numInClass[i];
+        double w1 = foundWeights[i];
+        if( n1 <= groupThreshold )
+            continue;
+        // filter out small rectangles inside large rectangles
+        for( j = 0; j < nclasses; j++ )
+        {
+            int n2 = numInClass[j];
+
+            if( j == i || n2 <= groupThreshold )
+                continue;
+
+            cv::Rect r2 = rrects[j];
+
+            int dx = cv::saturate_cast<int>( r2.width * eps );
+            int dy = cv::saturate_cast<int>( r2.height * eps );
+
+            if( r1.x >= r2.x - dx &&
+                r1.y >= r2.y - dy &&
+                r1.x + r1.width <= r2.x + r2.width + dx &&
+                r1.y + r1.height <= r2.y + r2.height + dy &&
+                (n2 > std::max(3, n1) || n1 < 3) )
+                break;
+        }
+
+        if( j == nclasses )
+        {
+            rectList.push_back(r1);
+            weights.push_back(w1);
+        }
     }
 }
 

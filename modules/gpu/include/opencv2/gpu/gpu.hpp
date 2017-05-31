@@ -1309,7 +1309,10 @@ struct CV_EXPORTS HOGDescriptor
     void computeConfidenceMultiScale(const GpuMat& img, vector<Rect>& found_locations,
                                                                     double hit_threshold, Size win_stride, Size padding,
                                                                     vector<HOGConfidence> &conf_out, int group_threshold);
-
+    void detectMultiScale(const GpuMat& img, vector<Rect>& found_locations, vector<double> &foundWeights,
+                                double hit_threshold=0, Size win_stride=Size(), Size padding=Size(),
+                                double scale0=1.05, double finalThreshold=2);
+    void _groupRectangles(vector<cv::Rect>& rectList, vector<double>& weights, int groupThreshold, double eps) const;
     void getDescriptors(const GpuMat& img, Size win_stride,
                         GpuMat& descriptors,
                         int descr_format=DESCR_FORMAT_COL_BY_COL);
